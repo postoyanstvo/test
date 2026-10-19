@@ -1,22 +1,5 @@
-# =============================================================================
-# GitHub Actions Workflow — «Визуализация всех видов вариативности»
-# =============================================================================
-# Этот workflow НЕ meant for real use. Он создан чтобы наглядно показать:
-#   • параллельные ветки
-#   • diamond-паттерн (fan-out + fan-in)
-#   • матричные расширения (matrix.include / matrix.exclude)
-#   • conditional branching (if:)
-#   • job outputs (меж-job передача данных)
-#   • reusable workflows (uses:)
-#   • concurrency groups
-#   • service containers
-#   • environment deployments
-#   • max-parallel / fail-fast
-# =============================================================================
-
 name: 🌳 Variability Showcase
 
-# ─── Триггеры (множественные) ────────────────────────────────────────────────
 on:
   push:
     branches: [main, "feature/**"]
@@ -39,66 +22,45 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "0 2 * * 1"  # еженедельно в 02:00 в понедельник
+    - cron: "0 2 * * 1"
   repository_dispatch:
     types: [deploy-notify]
 
-# ─── Глобальные переменные окружения (workflow-level env) ────────────────────
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   NODE_VERSION: "20"
 
-# ─── Глобальные разрешения (least privilege) ─────────────────────────────────
 permissions:
   contents: read
   packages: write
   id-token: write
 
-# ─── Конкурентность ──────────────────────────────────────────────────────────
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# ─── Дефолты для всех jobs ───────────────────────────────────────────────────
 defaults:
   run:
     shell: bash
     working-directory: ./src
 
-# =============================================================================
-# JOBS — каждый job — узел графа; `needs` — рёбра
-# =============================================================================
 jobs:
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 1. ROOT JOB — точка входа (нет `needs`)
-  #    Паттерн: fan-out (несколько downstream jobs)
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 1. ROOT (fan-out) ────────────────────────────────────────────────────
   setup:
     runs-on: ubuntu-latest
-    # outputs — передача данных downstream
     outputs:
       build_id: ${{ steps.meta.outputs.build_id }}
-      matrix: ${{ steps.meta.outputs.matrix }}
       skip_tests: ${{ steps.check.outputs.skip_tests }}
     steps:
       - uses: actions/checkout@v4
-
       - id: meta
-        run: |
-          echo "build_id=$(date +%s)" >> "$GITHUB_OUTPUT"
-          echo "matrix=['node18','node20','node22']" >> "$GITHUB_OUTPUT"
-
+        run: echo "build_id=$(date +%s)" >> "$GITHUB_OUTPUT"
       - id: check
-        run: |
-          skip="${{ inputs.skip_tests || 'false' }}"
-          echo "skip_tests=$skip" >> "$GITHUB_OUTPUT"
+        run: echo "skip_tests=${{ inputs.skip_tests || 'false' }}" >> "$GITHUB_OUTPUT"
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 2. PARALLEL BRANCHES (fan-out от setup)
-  #    Паттерн: ⤷ три job'а стартуют одновременно после setup
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 2. PARALLEL BRANCHES ─────────────────────────────────────────────────
   lint:
     needs: setup
     runs-on: ubuntu-latest
@@ -120,21 +82,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: npm audit --audit-level=high
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 3. MATRIX + INCLUDE/EXCLUDE + FAIL-FAST:FALSE
-  #    Паттерн: матрица расширяет один job в N параллельных инстансов
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 3. MATRIX + INCLUDE/EXCLUDE ──────────────────────────────────────────
   test-unit:
-    needs: [lint, typecheck, security-scan]  # FAN-IN: ждёт ВСЕ три upstream
+    needs: [lint, typecheck, security-scan]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      max-parallel: 4  # ограничивает одновременных инстансов
+      max-parallel: 4
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         node: ["18", "20", "22"]
         include:
-          # Дополнительная комбинация, не входящая в декартово произведение
           - os: ubuntu-latest
             node: "20"
             label: "primary"
@@ -142,7 +100,6 @@ jobs:
             node: "22"
             label: "bleeding-edge"
         exclude:
-          # Исключаем ненужные комбинации
           - os: windows-latest
             node: "18"
           - os: windows-latest
@@ -160,24 +117,20 @@ jobs:
         env:
           MATRIX_LABEL: ${{ matrix.label }}
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 4. DIAMOND PATTERN: A → (B, C) → D
-  #    Паттерн: ромб — ветвление и слияние
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 4. DIAMOND: A → (B, C) → D ──────────────────────────────────────────
   build:
     needs: setup
     runs-on: ubuntu-latest
     container:
-      image: node:${{ env.NODE_VERSION }}-slim
+      # ❌ Было: node:${{ env.NODE_VERSION }}-slim  ← env context здесь недоступен
+      # ✅ Исправлено: хардкод или отдельный шаг
+      image: node:20-slim
       env:
         BUILD_MODE: production
     steps:
       - uses: actions/checkout@v4
       - run: npm ci
       - run: npm run build
-      - id: artifact
-        run: |
-          echo "path=dist/" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: build-output-${{ needs.setup.outputs.build_id }}
@@ -191,7 +144,7 @@ jobs:
       - run: npm ci
       - run: npm run docs
 
-  # DIAMOND JOIN — ждёт ОБА upstream (build + build-docs)
+  # DIAMOND JOIN
   publish:
     needs: [build, build-docs]
     if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
@@ -206,10 +159,7 @@ jobs:
           path: dist/
       - run: npm publish
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 5. SERVICE CONTAINERS
-  #    Паттерн: job с сервисными контейнерами (DB, cache)
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 5. SERVICE CONTAINERS ────────────────────────────────────────────────
   test-integration:
     needs: test-unit
     if: needs.setup.outputs.skip_tests != 'true'
@@ -242,14 +192,11 @@ jobs:
           DATABASE_URL: postgres://postgres:secret@localhost:5432/app_test
           REDIS_URL: redis://localhost:6379
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 6. REUSABLE WORKFLOW (uses:)
-  #    Паттерн: вызов внешнего workflow как узла графа
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 6. REUSABLE WORKFLOW ─────────────────────────────────────────────────
   deploy-staging:
     needs: [test-integration, publish]
     if: github.event_name == 'workflow_dispatch' && inputs.environment == 'staging'
-    uses: ./.github/workflows/deploy-template.yml  # reusable workflow
+    uses: ./.github/workflows/deploy-template.yml
     with:
       environment: staging
       build-id: ${{ needs.setup.outputs.build_id }}
@@ -268,10 +215,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 7. CONDITIONAL BRANCHING (if:)
-  #    Паттерн: условный узел — виден в графе, но может быть skipped
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 7. CONDITIONAL BRANCHING ─────────────────────────────────────────────
   notify-pr:
     needs: [test-unit, test-integration]
     if: github.event_name == 'pull_request'
@@ -288,30 +232,17 @@ jobs:
     steps:
       - run: echo "🎉 Released ${{ github.ref_name }}"
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 8. CANNOT-CONTINUE-PATTERN (always() / failure())
-  #    Паттерн: job, который выполняется даже при падении upstream
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 8. always() / failure() ──────────────────────────────────────────────
   cleanup:
     if: always()
-    needs:
-      - build
-      - publish
-      - deploy-staging
-      - deploy-production
+    needs: [build, publish, deploy-staging, deploy-production]
     runs-on: ubuntu-latest
     steps:
       - run: |
-          echo "Status: ${{ needs.build.result }}"
-          echo "Status: ${{ needs.publish.result }}"
-          if [[ "${{ needs.build.result }}" == "failure" ]]; then
-            echo "🧹 Cleaning up partial artifacts..."
-          fi
+          echo "build: ${{ needs.build.result }}"
+          echo "publish: ${{ needs.publish.result }}"
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 9. MULTI-STAGE PIPELINE с OUTPUT PASSING (цепочка outputs)
-  #    Паттерн: A.outputs → B → C — данные текут по рёбрам
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 9. OUTPUT PASSING CHAIN ──────────────────────────────────────────────
   analyze-coverage:
     needs: [test-unit]
     if: always() && needs.test-unit.result == 'success'
@@ -339,10 +270,7 @@ jobs:
           echo "❌ Coverage ${{ needs.analyze-coverage.outputs.coverage_pct }}% < 80%"
           exit 1
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 10. CONTAINER JOB + VOLUMES (advanced isolation)
-  #     Паттерн: job внутри контейнера с volume mounts
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 10. CONTAINER + VOLUMES ──────────────────────────────────────────────
   perf-test:
     needs: [build]
     runs-on: ubuntu-latest
@@ -353,29 +281,21 @@ jobs:
         - /tmp/perf-results:/results
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          k6 run --vus 50 --duration 30s /app/src/perf/load-test.js
+      - run: k6 run --vus 50 --duration 30s /app/src/perf/load-test.js
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 11. COMPOSITE ACTION (uses локальный)
-  #     Паттерн: переиспользование шагов через composite
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 11. COMPOSITE ACTION ─────────────────────────────────────────────────
   smoke-test:
     needs: [deploy-staging, deploy-production]
     if: always() && (needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Composite action из репозитория:
       - uses: ./.github/actions/smoke-test
         with:
           target-url: https://example.com
           expected-status: 200
 
-  # ────────────────────────────────────────────────────────────────────────────
-  # 12. FINAL GATE — собирает результаты всех критических job'ов
-  #     Паттерн: final fan-in (звезда → один узел)
-  # ────────────────────────────────────────────────────────────────────────────
+  # ─── 12. FINAL GATE (звезда → 1) ─────────────────────────────────────────
   report:
     needs:
       - setup
@@ -393,20 +313,15 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: 📊 Build Status Report
+      - name: 📊 Summary
         run: |
-          echo "┌─────────────────────────────────┐"
-          echo "│       PIPELINE SUMMARY          │"
-          echo "├─────────────────────────────────┤"
-          echo "│ setup:          ${{ needs.setup.result }}"
-          echo "│ lint:           ${{ needs.lint.result }}"
-          echo "│ typecheck:      ${{ needs.typecheck.result }}"
-          echo "│ security-scan:  ${{ needs.security-scan.result }}"
-          echo "│ test-unit:      ${{ needs.test-unit.result }}"
-          echo "│ test-int:       ${{ needs.test-integration.result }}"
-          echo "│ build:          ${{ needs.build.result }}"
-          echo "│ build-docs:     ${{ needs.build-docs.result }}"
-          echo "│ publish:        ${{ needs.publish.result }}"
-          echo "│ deploy-stage:   ${{ needs.deploy-staging.result }}"
-          echo "│ deploy-prod:    ${{ needs.deploy-production.result }}"
-          echo "└─────────────────────────────────┘"
+          echo "setup:       ${{ needs.setup.result }}"
+          echo "lint:        ${{ needs.lint.result }}"
+          echo "typecheck:   ${{ needs.typecheck.result }}"
+          echo "security:    ${{ needs.security-scan.result }}"
+          echo "test-unit:   ${{ needs.test-unit.result }}"
+          echo "test-int:    ${{ needs.test-integration.result }}"
+          echo "build:       ${{ needs.build.result }}"
+          echo "publish:     ${{ needs.publish.result }}"
+          echo "deploy-stg:  ${{ needs.deploy-staging.result }}"
+          echo "deploy-prd:  ${{ needs.deploy-production.result }}"
